@@ -67,7 +67,7 @@ def cancel_kb():
 def main_menu_kb(is_admin: bool = False):
     rows = [
         [KeyboardButton(text="🛍 Каталог услуг")],
-        [KeyboardButton(text="📦 Мои покупки"), KeyboardButton(text="🆘 Помощь")],
+        [KeyboardButton(text="📦 Мои покупки"),
         [KeyboardButton(text="📩 Написать в поддержку")],   # 👈 НОВАЯ КНОПКА
     ]
     if is_admin:
