@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import backup
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
@@ -39,6 +40,8 @@ logging.basicConfig(
 async def main():
     # 1. База
     await db.init_db()
+        # Восстанавливаем БД из Telegram (если есть)
+    await backup.restore_backup(bot, ADMIN_IDS[0])
     await db.sync_services(SERVICES)
 
     # 2. Бот и CryptoPay
