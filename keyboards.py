@@ -88,13 +88,28 @@ def main_menu_kb(is_admin: bool = False):
 def admin_tickets_kb(tickets: list):
     buttons = []
     for t in tickets:
-        username = f"@{t['username']}" if t["username"] else t["full_name"]
-        preview = t["message"][:30] + ("..." if len(t["message"]) > 30 else "")
+        # Безопасное имя
+        if t.get("username"):
+            username = f"@{t['username']}"
+        else:
+            username = t.get("full_name") or f"ID{t['user_id']}"
+
+        # Безопасное превью — защита от None и обрезка
+        raw = t.get("message") or "(пусто)"
+        preview = raw[:25].replace("\n", " ")
+        if len(raw) > 25:
+            preview += "..."
+
+        # Обрезаем по 64 символа (лимит Telegram для кнопки)
+        button_text = f"#{t['id']} • {username} • {preview}"[:64]
+
         buttons.append([InlineKeyboardButton(
-            text=f"#{t['id']} • {username} • {preview}",
+            text=button_text,
             callback_data=f"adm_ticket_{t['id']}"
         )])
-    buttons.append([InlineKeyboardButton(text="« Назад", callback_data="adm_back")])
+    buttons.append([InlineKeyboardButton(
+        text="« Назад", callback_data="adm_back"
+    )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
