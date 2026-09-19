@@ -89,7 +89,7 @@ async def init_db():
                 blocked_at TEXT
             )
         """)
-                await db.execute("""
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS backup_meta (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 file_id TEXT,
