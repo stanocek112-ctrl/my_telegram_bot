@@ -2,6 +2,7 @@ import logging
 import asyncio
 import random
 from datetime import datetime
+from html import escape
 
 from generators import generate_phone, generate_code
 
@@ -95,13 +96,16 @@ async def deliver_order(bot: Bot, user_id: int, order: dict, service: dict):
         ])
         await bot.send_message(user_id, text, reply_markup=kb)
         
+from html import escape
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot, admin_ids: list):
     await db.add_user(message.from_user.id, message.from_user.username,
                       message.from_user.full_name)
     is_admin = message.from_user.id in admin_ids
+    safe_name = escape(message.from_user.full_name)
     await message.answer(
-        f"👋 Привет, <b>{message.from_user.full_name}</b>!\n\n"
+        f"👋 Привет, <b>{safe_name}</b>!\n\n"
         "🛍 Здесь ты можешь купить услуги с оплатой в криптовалюте.\n"
         "Выбери из каталога 👇",
         reply_markup=main_menu_kb(is_admin)
