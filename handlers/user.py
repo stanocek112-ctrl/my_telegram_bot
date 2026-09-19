@@ -1,26 +1,26 @@
 import logging
+import asyncio
+import random
 from datetime import datetime
 
-from aiogram import Router, F, Bot
+from aiogram import Router, F, Bot, BaseMiddleware
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    TelegramObject,
+)
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiocryptopay import AioCryptoPay
 from aiocryptopay.const import InvoiceStatus
+from typing import Callable, Dict, Any, Awaitable
 
 import database as db
 from services import PAYMENT_ASSET
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from keyboards import (
-    services_kb, back_kb, main_menu_kb,
-    user_tickets_kb,
-)
-
-class TicketForm(StatesGroup):
-    message = State()
+from keyboards import services_kb, back_kb, main_menu_kb, user_tickets_kb
+from generators import generate_phone, generate_code
 
 router = Router()
-
 
 async def deliver_order(bot: Bot, user_id: int, order: dict, service: dict):
     """Выдаёт товар пользователю в зависимости от типа."""
@@ -41,17 +41,32 @@ async def deliver_order(bot: Bot, user_id: int, order: dict, service: dict):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔗 Получить доступ", url=content)]
         ])
-        await bot.send_message(user_id, header + "Нажмите кнопку ниже, чтобы получить доступ:",
+        await bot.send_message(user_id, header + "Нажмите кнопку ниже:",
                                reply_markup=kb)
 
     elif dtype == "file":
-        # content = file_id
         try:
             await bot.send_document(user_id, document=content, caption=header)
         except Exception as e:
             logging.error(f"Ошибка отправки файла: {e}")
-            await bot.send_message(user_id, header + "⚠️ Ошибка выдачи файла. Напишите админу.")
+            await bot.send_message(user_id, header + "⚠️ Ошибка выдачи файла.")
 
+    # 👇 НОВЫЙ ТИП — рандомный номер телефона
+    elif dtype == "phone":
+        phone = generate_phone()
+        text = (
+            header +
+            f"📱 <b>Ваш номер:</b> <code>{phone}</code>\n\n"
+            f"⏱ <b>Время на активацию: 10 минут</b>\n\n"
+            "Нажмите кнопку ниже, когда отправите код на номер."
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="📨 Отправил код",
+                callback_data=f"sent_{order['id']}"
+            )],
+        ])
+        await bot.send_message(user_id, text, reply_markup=kb)
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot, admin_ids: list):
@@ -331,3 +346,93 @@ async def my_tickets(cb: CallbackQuery):
             f"   📅 {t['created_at'][:16]}\n\n"
         )
     await cb.message.edit_text(text, reply_markup=user_tickets_kb())
+    # ============================================================
+# ОТПРАВКА КОДА ПОСЛЕ ОПЛАТЫ
+# ============================================================
+
+@router.callback_query(F.data.startswith("sent_"))
+async def sent_code_handler(cb: CallbackQuery, bot: Bot):
+    """Пользователь нажал '📨 Отправил код'."""
+    order_id = cb.data.replace("sent_", "")
+    await cb.answer()
+
+    # Сообщение "Ожидаю код…"
+    await cb.message.edit_text(
+        "⏳ <b>Ожидаю код…</b>\n\n"
+        "Код придёт в течение 5–10 секунд.",
+        reply_markup=None
+    )
+
+    # Ждём 5-10 секунд
+    delay = random.randint(5, 10)
+    await asyncio.sleep(delay)
+
+    # Отправляем код
+    code = generate_code()
+    await bot.send_message(
+        cb.from_user.id,
+        f"🔔 <b>Новый код!</b>\n\n"
+        f"<code>{code}</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🔄 Повторный код",
+                callback_data=f"resend_{order_id}"
+            )],
+            [InlineKeyboardButton(
+                text="✅ Готово",
+                callback_data=f"done_{order_id}"
+            )],
+        ])
+    )
+
+
+@router.callback_query(F.data.startswith("resend_"))
+async def resend_code_handler(cb: CallbackQuery, bot: Bot):
+    """Кнопка '🔄 Повторный код' — заново ожидание и новый код."""
+    order_id = cb.data.replace("resend_", "")
+    await cb.answer("Отправляю новый код…")
+
+    delay = random.randint(5, 10)
+    await asyncio.sleep(delay)
+
+    code = generate_code()
+    await bot.send_message(
+        cb.from_user.id,
+        f"🔔 <b>Новый код!</b>\n\n"
+        f"<code>{code}</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🔄 Повторный код",
+                callback_data=f"resend_{order_id}"
+            )],
+            [InlineKeyboardButton(
+                text="✅ Готово",
+                callback_data=f"done_{order_id}"
+            )],
+        ])
+    )
+
+
+@router.callback_query(F.data.startswith("done_"))
+async def done_handler(cb: CallbackQuery, bot: Bot, admin_ids: list):
+    """Кнопка '✅ Готово' — пользователь подтвердил получение."""
+    order_id = cb.data.replace("done_", "")
+    await cb.answer("Готово!")
+
+    await cb.message.edit_text(
+        "✅ <b>Спасибо!</b>\n\n"
+        "Если возникнут вопросы — напишите в поддержку.",
+        reply_markup=None
+    )
+
+    # Уведомляем всех админов
+    for aid in admin_ids:
+        try:
+            await bot.send_message(
+                aid,
+                f"✅ Пользователь <code>{cb.from_user.id}</code> "
+                f"подтвердил получение кода по заказу "
+                f"<code>{order_id}</code>."
+            )
+        except Exception:
+            pass
