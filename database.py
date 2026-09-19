@@ -99,7 +99,6 @@ async def init_db():
         """)
         await db.commit()
 
-
 # ---------- Пользователи ----------
 
 async def add_user(user_id: int, username: str, full_name: str):
