@@ -1,7 +1,11 @@
 import aiosqlite
 from datetime import datetime
 
-DB_PATH = "shop.db"
+import aiosqlite
+import os
+from datetime import datetime
+
+DB_PATH = "/data/shop.db" if os.path.isdir("/data") else "shop.db"
 
 
 async def init_db():
