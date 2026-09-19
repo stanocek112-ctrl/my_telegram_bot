@@ -38,27 +38,33 @@ logging.basicConfig(
 
 
 async def main():
-    # 1. База
-    await db.init_db()
-        # Восстанавливаем БД из Telegram (если есть)
-    await backup.restore_backup(bot, ADMIN_IDS[0])
-    await db.sync_services(SERVICES)
-
-    # 2. Бот и CryptoPay
+    # 1. Создаём бота и клиенты ПЕРВЫМИ
     bot = Bot(
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     crypto = AioCryptoPay(token=CRYPTO_TOKEN, network=Networks.MAIN_NET)
-
-    # 3. Диспетчер
     dp = Dispatcher(storage=MemoryStorage())
-
-    # 4. Прокидываем зависимости
     dp["crypto"] = crypto
     dp["admin_ids"] = ADMIN_IDS
 
-    # 5. Роутеры
+    # 2. Инициализация БД
+    await db.init_db()
+
+    # 3. Восстановление БД из Telegram (bot уже создан!)
+    if ADMIN_IDS:
+        restored = await backup.restore_backup(bot, ADMIN_IDS[0])
+        if restored:
+            logging.info("[MAIN] БД восстановлена из бэкапа")
+
+    # 4. Синхронизация услуг из services.py
+    await db.sync_services(SERVICES)
+
+    # 5. Фоновая задача бэкапа (каждый час)
+    if ADMIN_IDS:
+        asyncio.create_task(backup.backup_loop(bot, ADMIN_IDS[0]))
+
+    # 6. Роутеры
     dp.include_router(admin.router)
     dp.include_router(user.router)
 
