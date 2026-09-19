@@ -21,19 +21,21 @@ SERVICES = {
     },
     "premium": {
         "name": " Telegram",
-        "description": "Получение номера для регистрации TG",
+        "description": "Получение номера для регистрации Telegram",
         "price_usdt": 0.7,
         "emoji": "",
         "delivery_type": "phone",      
         "delivery_content": "",
     },
     # Добавляй свои услуги сюда:
-    # "key": {
-    #     "name": "Название услуги",
-    #     "description": "Описание",
-    #     "price_usdt": 10.0,
-    #     "emoji": "🟠",
-    # },
+        "whatsapp": {
+        "name": "WhatsApp",
+        "description": "Получение номера для регистрации WhatsApp",
+        "price_usdt": 1.0,
+        "emoji": "",
+        "delivery_type": "phone",      
+        "delivery_content": "",
+    },
 }
 
 # Валюта для оплаты (USDT, TON, BTC, ETH и др.)

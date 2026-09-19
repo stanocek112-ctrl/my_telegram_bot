@@ -19,7 +19,12 @@ from typing import Callable, Dict, Any, Awaitable
 
 import database as db
 from services import PAYMENT_ASSET
-from keyboards import services_kb, back_kb, main_menu_kb, user_tickets_kb
+from keyboards import (
+    services_kb, back_kb, main_menu_kb,
+    user_tickets_kb,
+    balance_menu_kb, topup_amounts_kb,   # 👈
+    payment_choice_kb, cancel_kb,         # 👈
+)
 from generators import generate_phone, generate_code
 
 router = Router()
@@ -37,6 +42,8 @@ class TicketForm(StatesGroup):
 class CodeFlow(StatesGroup):
     waiting_code = State()
 
+class BalanceForm(StatesGroup):
+    custom_amount = State()
 
 # если у вас есть ещё какие-то FSM — добавьте их здесь тоже
 
@@ -131,17 +138,17 @@ async def buy_service(cb: CallbackQuery):
         await cb.answer("Услуга не найдена", show_alert=True)
         return
 
+    balance = await db.get_balance(cb.from_user.id)
     text = (
         f"<b>{service['emoji']} {service['name']}</b>\n\n"
         f"📝 {service['description']}\n\n"
-        f"💰 Цена: <b>{service['price_usdt']} {PAYMENT_ASSET}</b>"
+        f"💰 Цена: <b>{service['price_usdt']} {PAYMENT_ASSET}</b>\n"
+        f"💼 Ваш баланс: <b>{balance:.2f} USDT</b>"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Оплатить", callback_data=f"pay_{key}")],
-        [InlineKeyboardButton(text="« Назад", callback_data="back_to_services")],
-    ])
-    await cb.message.edit_text(text, reply_markup=kb)
-
+    await cb.message.edit_text(
+        text,
+        reply_markup=payment_choice_kb(key, balance, service["price_usdt"])
+    )
 
 @router.callback_query(F.data.startswith("pay_"))
 async def create_invoice(cb: CallbackQuery, bot: Bot, crypto: AioCryptoPay):
@@ -457,3 +464,270 @@ async def done_handler(cb: CallbackQuery, bot: Bot, admin_ids: list):
             )
         except Exception:
             pass
+        # ============================================================
+# ВНУТРЕННИЙ БАЛАНС
+# ============================================================
+
+@router.message(F.text == "💰 Мой баланс")
+async def show_balance(message: Message):
+    balance = await db.get_balance(message.from_user.id)
+    await message.answer(
+        f"💼 <b>Ваш баланс</b>\n\n"
+        f"💰 Текущий: <b>{balance:.2f} USDT</b>\n\n"
+        "Пополните баланс один раз — потом оплачивайте услуги "
+        "в один клик без крипты.",
+        reply_markup=balance_menu_kb()
+    )
+
+   # ============================================================
+# ПОПОЛНЕНИЕ БАЛАНСА — ХЕНДЛЕРЫ
+# ============================================================
+
+@router.callback_query(F.data == "balance_topup")
+async def balance_topup(cb: CallbackQuery):
+    await cb.answer()
+    await cb.message.edit_text(
+        "💳 <b>Пополнение баланса</b>\n\n"
+        "Выберите сумму:",
+        reply_markup=topup_amounts_kb()
+    )
+
+
+@router.callback_query(F.data.startswith("topup_"))
+async def topup_amount(cb: CallbackQuery, state: FSMContext,
+                       crypto: AioCryptoPay):
+    action = cb.data.replace("topup_", "")
+
+    if action == "custom":
+        await cb.answer()
+        await state.set_state(BalanceForm.custom_amount)
+        await cb.message.edit_text(
+            "✏️ <b>Своя сумма</b>\n\n"
+            "Введите сумму в USDT (например: <code>12.5</code>):",
+            reply_markup=cancel_kb()
+        )
+        return
+
+    amount = float(action)
+    await create_topup_invoice(cb, crypto, amount)
+
+
+@router.message(BalanceForm.custom_amount)
+async def topup_custom_amount(message: Message, state: FSMContext,
+                              crypto: AioCryptoPay):
+    try:
+        amount = float(message.text.replace(",", "."))
+        if amount < 1:
+            await message.answer("Минимум 1 USDT.")
+            return
+        if amount > 10000:
+            await message.answer("Максимум 10000 USDT.")
+            return
+    except ValueError:
+        await message.answer("Введите число.")
+        return
+
+    await state.clear()
+    await create_topup_invoice_message(message, crypto, amount)
+
+
+async def create_topup_invoice(cb: CallbackQuery, crypto, amount: float):
+    payload = f"topup_{cb.from_user.id}_{int(datetime.now().timestamp())}"
+    try:
+        invoice = await crypto.create_invoice(
+            asset=PAYMENT_ASSET,
+            amount=amount,
+            description=f"Пополнение баланса {amount} {PAYMENT_ASSET}",
+            payload=payload,
+            expires_in=3600,
+        )
+    except Exception as e:
+        logging.error(f"CryptoPay topup: {e}")
+        await cb.message.edit_text("❌ Не удалось создать счёт.",
+                                   reply_markup=balance_menu_kb())
+        return
+
+    await db.create_order(
+        cb.from_user.id, "topup", f"Пополнение {amount} USDT",
+        amount, payload, invoice.invoice_id
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Перейти к оплате",
+                              url=invoice.bot_invoice_url)],
+        [InlineKeyboardButton(text="🔄 Проверить оплату",
+                              callback_data=f"checktopup_{payload}")],
+        [InlineKeyboardButton(text="« Назад",
+                              callback_data="balance_back")],
+    ])
+    await cb.message.edit_text(
+        f"🧾 <b>Счёт создан</b>\n\n"
+        f"Сумма: <b>{amount} {PAYMENT_ASSET}</b>\n"
+        f"Назначение: пополнение баланса\n\n"
+        "Нажмите «Перейти к оплате», затем «Проверить оплату».",
+        reply_markup=kb
+    )
+
+
+async def create_topup_invoice_message(message: Message, crypto, amount: float):
+    payload = f"topup_{message.from_user.id}_{int(datetime.now().timestamp())}"
+    try:
+        invoice = await crypto.create_invoice(
+            asset=PAYMENT_ASSET,
+            amount=amount,
+            description=f"Пополнение баланса {amount} {PAYMENT_ASSET}",
+            payload=payload,
+            expires_in=3600,
+        )
+    except Exception as e:
+        logging.error(f"CryptoPay topup: {e}")
+        await message.answer("❌ Не удалось создать счёт.",
+                             reply_markup=balance_menu_kb())
+        return
+
+    await db.create_order(
+        message.from_user.id, "topup", f"Пополнение {amount} USDT",
+        amount, payload, invoice.invoice_id
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Перейти к оплате",
+                              url=invoice.bot_invoice_url)],
+        [InlineKeyboardButton(text="🔄 Проверить оплату",
+                              callback_data=f"checktopup_{payload}")],
+        [InlineKeyboardButton(text="« Назад",
+                              callback_data="balance_back")],
+    ])
+    await message.answer(
+        f"🧾 <b>Счёт создан</b>\n\n"
+        f"Сумма: <b>{amount} {PAYMENT_ASSET}</b>\n\n"
+        "Нажмите «Перейти к оплате», затем «Проверить оплату».",
+        reply_markup=kb
+    )
+
+
+@router.callback_query(F.data.startswith("checktopup_"))
+async def check_topup(cb: CallbackQuery, crypto: AioCryptoPay, bot: Bot):
+    payload = cb.data.replace("checktopup_", "")
+    order = await db.get_order_by_payload(payload)
+
+    if not order:
+        await cb.answer("Заказ не найден", show_alert=True)
+        return
+    if order["status"] == "paid":
+        await cb.answer("Уже зачислено ✅", show_alert=True)
+        return
+
+    await cb.answer("Проверяю...")
+    try:
+        invoices = await crypto.get_invoices(invoice_ids=order["invoice_id"])
+        inv = invoices[0] if invoices else None
+    except Exception as e:
+        logging.error(f"check_topup: {e}")
+        await cb.answer("Ошибка проверки", show_alert=True)
+        return
+
+    if not inv or inv.status != InvoiceStatus.PAID:
+        await cb.answer("Оплата ещё не поступила", show_alert=True)
+        return
+
+    await db.mark_paid(payload)
+    await db.add_balance(
+        cb.from_user.id, order["amount"],
+        tx_type="deposit",
+        description="Пополнение через CryptoBot"
+    )
+
+    new_balance = await db.get_balance(cb.from_user.id)
+    await cb.message.edit_text(
+        f"✅ <b>Баланс пополнен!</b>\n\n"
+        f"Зачислено: <b>+{order['amount']:.2f} {PAYMENT_ASSET}</b>\n"
+        f"💰 Новый баланс: <b>{new_balance:.2f} USDT</b>",
+        reply_markup=balance_menu_kb()
+    )
+
+
+@router.callback_query(F.data.startswith("paybal_"))
+async def pay_with_balance(cb: CallbackQuery, bot: Bot, admin_ids: list):
+    key = cb.data.replace("paybal_", "")
+    service = await db.get_service(key)
+    if not service:
+        await cb.answer("Услуга не найдена", show_alert=True)
+        return
+
+    balance = await db.get_balance(cb.from_user.id)
+    price = service["price_usdt"]
+
+    if balance < price:
+        await cb.answer("Недостаточно средств", show_alert=True)
+        return
+
+    await db.add_balance(
+        cb.from_user.id, -price,
+        tx_type="purchase",
+        description=f"Покупка: {service['name']}"
+    )
+
+    payload = f"bal_{cb.from_user.id}_{int(datetime.now().timestamp())}"
+    await db.create_order(
+        cb.from_user.id, key, service["name"],
+        price, payload, 0
+    )
+    await db.mark_paid(payload)
+
+    order = await db.get_order_by_payload(payload)
+    await deliver_order(bot, cb.from_user.id, dict(order), service)
+
+    new_balance = await db.get_balance(cb.from_user.id)
+    await cb.message.edit_text(
+        f"✅ <b>Оплачено с баланса!</b>\n\n"
+        f"📦 {service['name']}\n"
+        f"💵 Списано: <b>{price:.2f} USDT</b>\n"
+        f"💰 Остаток: <b>{new_balance:.2f} USDT</b>\n\n"
+        "Товар выдан в сообщении ниже 👇"
+    )
+
+    for aid in admin_ids:
+        try:
+            await bot.send_message(
+                aid,
+                f"💰 <b>Покупка с баланса</b>\n\n"
+                f"👤 {cb.from_user.full_name} "
+                f"(<code>{cb.from_user.id}</code>)\n"
+                f"📦 {service['name']}\n"
+                f"💵 {price:.2f} USDT"
+            )
+        except Exception:
+            pass
+@router.callback_query(F.data == "balance_back")
+async def balance_back(cb: CallbackQuery):
+    await cb.answer()
+    balance = await db.get_balance(cb.from_user.id)
+    await cb.message.edit_text(
+        f"💼 <b>Ваш баланс</b>\n\n"
+        f"💰 Текущий: <b>{balance:.2f} USDT</b>",
+        reply_markup=balance_menu_kb()
+    )
+@router.callback_query(F.data == "balance_history")
+async def balance_history(cb: CallbackQuery):
+    await cb.answer()
+    txs = await db.get_transactions(cb.from_user.id)
+    if not txs:
+        await cb.message.edit_text(
+            "📜 <b>Транзакций пока нет.</b>\n\n"
+            "Пополните баланс или купите услугу — здесь появится история.",
+            reply_markup=balance_menu_kb()
+        )
+        return
+
+    text = "📜 <b>История операций:</b>\n\n"
+    for t in txs:
+        sign = "+" if t["amount"] > 0 else ""
+        emoji = {"deposit": "💳", "purchase": "🛍",
+                 "admin_add": "➕", "admin_sub": "➖"}.get(t["type"], "•")
+        text += (
+            f"{emoji} {sign}{t['amount']:.2f} USDT\n"
+            f"   {t['description'] or t['type']}\n"
+            f"   📅 {t['created_at'][:16]}\n\n"
+        )
+    await cb.message.edit_text(text, reply_markup=balance_menu_kb())

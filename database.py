@@ -39,7 +39,6 @@ async def init_db():
                 delivery_content TEXT
             )
         """)
-        # 👇 НОВАЯ ТАБЛИЦА
         await db.execute("""
             CREATE TABLE IF NOT EXISTS tickets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +52,6 @@ async def init_db():
                 closed_at TEXT
             )
         """)
-        # 👇 История сообщений внутри тикета
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ticket_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,6 +59,30 @@ async def init_db():
                 from_admin INTEGER,
                 text TEXT,
                 created_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS balances (
+                user_id INTEGER PRIMARY KEY,
+                amount REAL DEFAULT 0,
+                updated_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS balance_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount REAL,
+                type TEXT,
+                description TEXT,
+                created_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS blocked_users (
+                user_id INTEGER PRIMARY KEY,
+                reason TEXT,
+                blocked_at TEXT
             )
         """)
         await db.commit()
@@ -106,7 +128,9 @@ async def create_order(user_id, service_key, service_name, amount, payload, invo
 async def get_order_by_payload(payload: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM orders WHERE payload = ?", (payload,)) as cur:
+        async with db.execute(
+            "SELECT * FROM orders WHERE payload = ?", (payload,)
+        ) as cur:
             return await cur.fetchone()
 
 
@@ -136,7 +160,7 @@ async def get_user_orders(user_id: int, limit: int = 10):
             "ORDER BY paid_at DESC LIMIT ?",
             (user_id, limit)
         ) as cur:
-            return [row async for row in cur]
+            return [dict(row) async for row in cur]
 
 
 async def get_stats():
@@ -148,10 +172,9 @@ async def get_stats():
         return {"orders": cnt, "revenue": total}
 
 
-# ---------- Услуги (синхронизация) ----------
+# ---------- Услуги ----------
 
 async def sync_services(services: dict):
-    """При старте заливаем услуги из services.py в БД (если их там нет)."""
     async with aiosqlite.connect(DB_PATH) as db:
         for key, s in services.items():
             await db.execute(
@@ -213,7 +236,9 @@ async def add_service(key, name, description, price, emoji, d_type, d_content):
             (key, name, description, price, emoji, d_type, d_content)
         )
         await db.commit()
-        # ---------- Тикеты (обращения) ----------
+
+
+# ---------- Тикеты ----------
 
 async def create_ticket(user_id, username, full_name, phone, message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -285,3 +310,112 @@ async def count_open_tickets():
             "SELECT COUNT(*) FROM tickets WHERE status='open'"
         ) as cur:
             return (await cur.fetchone())[0]
+
+
+# ---------- Баланс ----------
+
+async def get_balance(user_id: int) -> float:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT amount FROM balances WHERE user_id=?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0.0
+
+
+async def add_balance(user_id: int, amount: float,
+                      tx_type: str = "deposit",
+                      description: str = ""):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT amount FROM balances WHERE user_id=?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+
+        if row is None:
+            await db.execute(
+                "INSERT INTO balances (user_id, amount, updated_at) "
+                "VALUES (?, ?, ?)",
+                (user_id, amount, datetime.now().isoformat())
+            )
+        else:
+            await db.execute(
+                "UPDATE balances SET amount = amount + ?, updated_at = ? "
+                "WHERE user_id=?",
+                (amount, datetime.now().isoformat(), user_id)
+            )
+
+        await db.execute(
+            "INSERT INTO balance_transactions "
+            "(user_id, amount, type, description, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (user_id, amount, tx_type, description,
+             datetime.now().isoformat())
+        )
+        await db.commit()
+
+
+async def get_transactions(user_id: int, limit: int = 15):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM balance_transactions "
+            "WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit)
+        ) as cur:
+            return [dict(r) async for r in cur]
+
+
+async def get_all_balances(limit: int = 50):
+    """Возвращает ВСЕХ пользователей с их балансом (включая 0)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT u.user_id, "
+            "COALESCE(b.amount, 0) as amount, "
+            "u.username, u.full_name "
+            "FROM users u "
+            "LEFT JOIN balances b ON b.user_id = u.user_id "
+            "ORDER BY u.created_at DESC LIMIT ?",
+            (limit,)
+        ) as cur:
+            return [dict(r) async for r in cur]
+
+
+# ---------- Блокировки ----------
+
+async def block_user(user_id: int, reason: str = ""):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO blocked_users "
+            "(user_id, reason, blocked_at) VALUES (?, ?, ?)",
+            (user_id, reason, datetime.now().isoformat())
+        )
+        await db.commit()
+
+
+async def unblock_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM blocked_users WHERE user_id=?", (user_id,))
+        await db.commit()
+
+
+async def is_blocked(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM blocked_users WHERE user_id=?", (user_id,)
+        ) as cur:
+            return await cur.fetchone() is not None
+
+
+async def get_all_users_with_status():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT u.user_id, u.username, u.full_name, "
+            "CASE WHEN b.user_id IS NOT NULL THEN 1 ELSE 0 END as blocked "
+            "FROM users u "
+            "LEFT JOIN blocked_users b ON u.user_id = b.user_id "
+            "ORDER BY u.created_at DESC LIMIT 50"
+        ) as cur:
+            return [dict(r) async for r in cur]

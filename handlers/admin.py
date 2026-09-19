@@ -10,6 +10,8 @@ from keyboards import (
     admin_main_kb, admin_services_kb, admin_service_edit_kb,
     admin_back_kb, cancel_kb,
     admin_tickets_kb, admin_ticket_view_kb,
+    admin_balances_kb, admin_balance_view_kb,
+    admin_users_kb, admin_user_view_kb,       
 )
 router = Router()
 
@@ -29,6 +31,7 @@ class AdminSG(StatesGroup):
     add_content = State()
     broadcast_text = State()
     ticket_reply = State()
+    balance_amount = State()
 
 
 def is_admin(user_id: int, admin_ids: list) -> bool:
@@ -525,3 +528,205 @@ async def adm_ticket_close(cb: CallbackQuery, bot: Bot, admin_ids: list):
             f"📩 <b>Открытые обращения ({len(tickets)}):</b>",
             reply_markup=admin_tickets_kb(tickets)
         )
+        # ============================================================
+# БАЛАНСЫ (АДМИН)
+# ============================================================
+
+@router.callback_query(F.data == "adm_balances")
+async def adm_balances_list(cb: CallbackQuery, admin_ids: list):
+    if not is_admin(cb.from_user.id, admin_ids):
+        return
+    balances = await db.get_all_balances()
+    if not balances:
+        await cb.message.edit_text(
+            "💰 Пока ни у кого нет баланса.",
+            reply_markup=admin_back_kb()
+        )
+        return
+    await cb.message.edit_text(
+        f"💰 <b>Балансы пользователей</b>\n\n"
+        "Нажмите на пользователя для управления:",
+        reply_markup=admin_balances_kb(balances)
+    )
+
+
+@router.callback_query(F.data.startswith("adm_bal_add_"))
+async def adm_bal_add_start(cb: CallbackQuery, state: FSMContext,
+                             admin_ids: list):
+    if not is_admin(cb.from_user.id, admin_ids):
+        return
+    user_id = int(cb.data.replace("adm_bal_add_", ""))
+    await state.update_data(target_user=user_id, mode="add")
+    await state.set_state(AdminSG.balance_amount)
+    await cb.message.edit_text(
+        f"➕ <b>Начисление</b>\n\n"
+        f"Пользователь: <code>{user_id}</code>\n"
+        "Введите сумму для начисления (например: <code>10</code>):",
+        reply_markup=cancel_kb()
+    )
+
+
+@router.callback_query(F.data.startswith("adm_bal_sub_"))
+async def adm_bal_sub_start(cb: CallbackQuery, state: FSMContext,
+                             admin_ids: list):
+    if not is_admin(cb.from_user.id, admin_ids):
+        return
+    user_id = int(cb.data.replace("adm_bal_sub_", ""))
+    await state.update_data(target_user=user_id, mode="sub")
+    await state.set_state(AdminSG.balance_amount)
+    await cb.message.edit_text(
+        f"➖ <b>Списание</b>\n\n"
+        f"Пользователь: <code>{user_id}</code>\n"
+        "Введите сумму для списания:",
+        reply_markup=cancel_kb()
+    )
+
+
+@router.callback_query(F.data.startswith("adm_bal_"))
+async def adm_balance_view(cb: CallbackQuery, admin_ids: list):
+    if not is_admin(cb.from_user.id, admin_ids):
+        return
+
+    # Игнорируем вложенные action-данные (add/sub)
+    if (cb.data.startswith("adm_bal_add_")
+            or cb.data.startswith("adm_bal_sub_")):
+        return
+
+    user_id = int(cb.data.replace("adm_bal_", ""))
+    balance = await db.get_balance(user_id)
+    await cb.message.edit_text(
+        f"👤 <b>Пользователь</b> <code>{user_id}</code>\n\n"
+        f"💰 Баланс: <b>{balance:.2f} USDT</b>",
+        reply_markup=admin_balance_view_kb(user_id)
+    )
+
+
+@router.message(AdminSG.balance_amount)
+async def adm_bal_amount_save(message: Message, state: FSMContext,
+                               admin_ids: list, bot: Bot):
+    if not is_admin(message.from_user.id, admin_ids):
+        return
+    try:
+        amount = float(message.text.replace(",", "."))
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите положительное число.")
+        return
+
+    data = await state.get_data()
+    target = data["target_user"]
+    mode = data["mode"]
+
+    if mode == "add":
+        await db.add_balance(target, amount, tx_type="admin_add",
+                             description="Начисление админом")
+        action_text = f"➕ Начислено {amount:.2f} USDT"
+    else:
+        current = await db.get_balance(target)
+        if current < amount:
+            await message.answer(
+                f"⚠️ У пользователя только {current:.2f} USDT. "
+                "Списание невозможно."
+            )
+            return
+        await db.add_balance(target, -amount, tx_type="admin_sub",
+                             description="Списание админом")
+        action_text = f"➖ Списано {amount:.2f} USDT"
+
+    await state.clear()
+    new_balance = await db.get_balance(target)
+
+    await message.answer(
+        f"✅ <b>Готово!</b>\n\n"
+        f"{action_text}\n"
+        f"👤 Пользователь: <code>{target}</code>\n"
+        f"💰 Новый баланс: <b>{new_balance:.2f} USDT</b>",
+        reply_markup=admin_back_kb()
+    )
+
+    # Уведомляем пользователя
+    try:
+        if mode == "add":
+            notif = (
+                f"💰 <b>Ваш баланс пополнен!</b>\n\n"
+                f"Зачислено: <b>+{amount:.2f} USDT</b>\n"
+                f"Новый баланс: <b>{new_balance:.2f} USDT</b>"
+            )
+        else:
+            notif = (
+                f"⚠️ <b>С вашего баланса списано</b>\n\n"
+                f"Списано: <b>-{amount:.2f} USDT</b>\n"
+                f"Новый баланс: <b>{new_balance:.2f} USDT</b>\n\n"
+                "По вопросам — обратитесь в поддержку."
+            )
+        await bot.send_message(target, notif)
+    except Exception as e:
+        logging.error(f"Не удалось уведомить: {e}")
+
+
+# ============================================================
+# БЛОКИРОВКА ПОЛЬЗОВАТЕЛЕЙ
+# ============================================================
+
+@router.callback_query(F.data == "adm_users")
+async def adm_users_list(cb: CallbackQuery, admin_ids: list):
+    if not is_admin(cb.from_user.id, admin_ids):
+        return
+    users = await db.get_all_users_with_status()
+    if not users:
+        await cb.message.edit_text(
+            "Пока нет пользователей.",
+            reply_markup=admin_back_kb()
+        )
+        return
+    await cb.message.edit_text(
+        f"🚫 <b>Пользователи ({len(users)}):</b>\n\n"
+        "Нажмите на пользователя для блокировки/разблокировки.",
+        reply_markup=admin_users_kb(users)
+    )
+
+
+@router.callback_query(F.data.startswith("adm_user_"))
+async def adm_user_view(cb: CallbackQuery, admin_ids: list):
+    if not is_admin(cb.from_user.id, admin_ids):
+        return
+
+    # Игнорируем block/unblock — обрабатываются ниже
+    if (cb.data.startswith("adm_user_block_")
+            or cb.data.startswith("adm_user_unblock_")):
+        return
+
+    user_id = int(cb.data.replace("adm_user_", ""))
+    blocked = await db.is_blocked(user_id)
+    status = "🚫 Заблокирован" if blocked else "✅ Активен"
+    await cb.message.edit_text(
+        f"👤 <b>Пользователь</b>\n\n"
+        f"🆔 <code>{user_id}</code>\n"
+        f"Статус: {status}",
+        reply_markup=admin_user_view_kb(user_id, blocked)
+    )
+
+
+@router.callback_query(F.data.startswith("adm_block_"))
+async def adm_user_block(cb: CallbackQuery, admin_ids: list):
+    if not is_admin(cb.from_user.id, admin_ids):
+        return
+    user_id = int(cb.data.replace("adm_block_", ""))
+    await db.block_user(user_id)
+    await cb.answer("Пользователь заблокирован", show_alert=True)
+    await cb.message.edit_reply_markup(
+        reply_markup=admin_user_view_kb(user_id, True)
+    )
+
+
+@router.callback_query(F.data.startswith("adm_unblock_"))
+async def adm_user_unblock(cb: CallbackQuery, admin_ids: list):
+    if not is_admin(cb.from_user.id, admin_ids):
+        return
+    user_id = int(cb.data.replace("adm_unblock_", ""))
+    await db.unblock_user(user_id)
+    await cb.answer("Пользователь разблокирован", show_alert=True)
+    await cb.message.edit_reply_markup(
+        reply_markup=admin_user_view_kb(user_id, False)
+    )
