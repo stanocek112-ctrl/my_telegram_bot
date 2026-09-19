@@ -89,6 +89,14 @@ async def init_db():
                 blocked_at TEXT
             )
         """)
+                await db.execute("""
+            CREATE TABLE IF NOT EXISTS backup_meta (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                file_id TEXT,
+                message_id INTEGER,
+                created_at TEXT
+            )
+        """)
         await db.commit()
 
 
@@ -423,3 +431,27 @@ async def get_all_users_with_status():
             "ORDER BY u.created_at DESC LIMIT 50"
         ) as cur:
             return [dict(r) async for r in cur]
+            # ============================================================
+# BACKUP META
+# ============================================================
+
+async def save_backup_meta(file_id: str, message_id: int):
+    """Сохраняет file_id последнего бэкапа."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO backup_meta (id, file_id, message_id, created_at) "
+            "VALUES (1, ?, ?, ?)",
+            (file_id, message_id, datetime.now().isoformat())
+        )
+        await db.commit()
+
+
+async def get_backup_meta():
+    """Возвращает последний бэкап (file_id, message_id) или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM backup_meta WHERE id=1"
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
