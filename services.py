@@ -8,18 +8,24 @@ SERVICES = {
         "description": "Получение номера для регистрации MAX",
         "price_usdt": 3.0,
         "emoji": "",
+        "delivery_type": "phone" ,
+        "delivery_content": "",
     },
     "standard": {
-        "name": " VK",
+        "name": " VKонтакте",
         "description": "Получение номера для регистрации VK",
         "price_usdt": 0.5,
         "emoji": "",
+        "delivery_type": "phone",       
+        "delivery_content": "",
     },
     "premium": {
-        "name": " TG",
+        "name": " Telegram",
         "description": "Получение номера для регистрации TG",
         "price_usdt": 0.7,
         "emoji": "",
+        "delivery_type": "phone",      
+        "delivery_content": "",
     },
     # Добавляй свои услуги сюда:
     # "key": {
