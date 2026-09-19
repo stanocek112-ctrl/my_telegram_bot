@@ -21,6 +21,22 @@ from keyboards import services_kb, back_kb, main_menu_kb, user_tickets_kb
 from generators import generate_phone, generate_code
 
 router = Router()
+# ============================================================
+# FSM-СОСТОЯНИЯ
+# ============================================================
+
+from aiogram.fsm.state import State, StatesGroup
+
+
+class TicketForm(StatesGroup):
+    message = State()
+
+
+class CodeFlow(StatesGroup):
+    waiting_code = State()
+
+
+# если у вас есть ещё какие-то FSM — добавьте их здесь тоже
 
 async def deliver_order(bot: Bot, user_id: int, order: dict, service: dict):
     """Выдаёт товар пользователю в зависимости от типа."""
