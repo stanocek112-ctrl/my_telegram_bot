@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 
 DB_PATH = "/data/shop.db" if os.path.isdir("/data") else "shop.db"
-
+#плдывф
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
