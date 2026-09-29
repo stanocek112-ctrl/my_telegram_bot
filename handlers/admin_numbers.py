@@ -26,6 +26,7 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 router = Router()
 
+
 # ============================================================
 # FSM
 # ============================================================
@@ -67,49 +68,7 @@ async def adm_numbers_list(cb: CallbackQuery, state: FSMContext):
 
 
 # ============================================================
-# МЕНЮ УСЛУГИ
-# ============================================================
-
-@router.callback_query(F.data.startswith("adm_num_"))
-async def adm_number_service(cb: CallbackQuery, state: FSMContext):
-    if not is_admin(cb.from_user.id):
-        return
-
-    # Игнорируем вложенные action
-    if (cb.data.startswith("adm_num_add_")
-            or cb.data.startswith("adm_num_stats_")
-            or cb.data.startswith("adm_num_clear_")):
-        return
-
-    key = cb.data.replace("adm_num_", "")
-    service = await db.get_service(key)
-    if not service:
-        await cb.answer("Услуга не найдена", show_alert=True)
-        return
-
-    await cb.answer()
-    await state.clear()
-
-    free = await db.count_free_numbers(key)
-    total = await db.count_total_numbers(key)
-    used = total - free
-
-    emoji = service.get("emoji") or "📦"
-
-    await cb.message.edit_text(
-        f"📱 <b>Склад номеров</b>\n\n"
-        f"{emoji} Услуга: <b>{service['name']}</b>\n"
-        f"🔑 Ключ: <code>{key}</code>\n\n"
-        f"📊 Статистика:\n"
-        f"• Свободных: <b>{free}</b>\n"
-        f"• Использованных: <b>{used}</b>\n"
-        f"• Всего: <b>{total}</b>",
-        reply_markup=admin_number_service_kb(key)
-    )
-
-
-# ============================================================
-# ДОБАВЛЕНИЕ НОМЕРОВ
+# ДОБАВЛЕНИЕ НОМЕРОВ (конкретный фильтр — до общего!)
 # ============================================================
 
 @router.callback_query(F.data.startswith("adm_num_add_"))
@@ -196,7 +155,7 @@ async def adm_num_add_save(message: Message, state: FSMContext):
 
 
 # ============================================================
-# СТАТИСТИКА
+# СТАТИСТИКА (конкретный)
 # ============================================================
 
 @router.callback_query(F.data.startswith("adm_num_stats_"))
@@ -231,7 +190,7 @@ async def adm_num_stats(cb: CallbackQuery):
 
 
 # ============================================================
-# ОЧИСТКА
+# ОЧИСТКА — подтверждение (конкретный, до общего clear_)
 # ============================================================
 
 @router.callback_query(F.data.startswith("adm_num_clear_do_"))
@@ -258,11 +217,16 @@ async def adm_num_clear_do(cb: CallbackQuery):
     )
 
 
+# ============================================================
+# ОЧИСТКА — запрос подтверждения (ПОСЛЕ clear_do_)
+# ============================================================
+
 @router.callback_query(F.data.startswith("adm_num_clear_"))
 async def adm_num_clear_confirm(cb: CallbackQuery):
     if not is_admin(cb.from_user.id):
         return
 
+    # На всякий случай: не обрабатываем уже подтверждённый action
     if cb.data.startswith("adm_num_clear_do_"):
         return
 
@@ -288,7 +252,40 @@ async def adm_num_clear_confirm(cb: CallbackQuery):
         reply_markup=admin_number_clear_confirm_kb(key)
     )
 
-@router.callback_query()
-async def debug_admin_num(cb: CallbackQuery):
-    print(f"[DEBUG NUM] user_id={cb.from_user.id}, is_admin={cb.from_user.id in ADMIN_IDS}, data={cb.data!r}")
+
+# ============================================================
+# КАРТОЧКА УСЛУГИ (общий фильтр — В САМОМ КОНЦЕ!)
+# ============================================================
+
+@router.callback_query(F.data.startswith("adm_num_"))
+async def adm_number_service(cb: CallbackQuery, state: FSMContext):
+    """Открывает карточку услуги. Срабатывает только если
+    выше не поймали конкретный callback."""
+    if not is_admin(cb.from_user.id):
+        return
+
+    key = cb.data.replace("adm_num_", "")
+    service = await db.get_service(key)
+    if not service:
+        await cb.answer("Услуга не найдена", show_alert=True)
+        return
+
     await cb.answer()
+    await state.clear()
+
+    free = await db.count_free_numbers(key)
+    total = await db.count_total_numbers(key)
+    used = total - free
+
+    emoji = service.get("emoji") or "📦"
+
+    await cb.message.edit_text(
+        f"📱 <b>Склад номеров</b>\n\n"
+        f"{emoji} Услуга: <b>{service['name']}</b>\n"
+        f"🔑 Ключ: <code>{key}</code>\n\n"
+        f"📊 Статистика:\n"
+        f"• Свободных: <b>{free}</b>\n"
+        f"• Использованных: <b>{used}</b>\n"
+        f"• Всего: <b>{total}</b>",
+        reply_markup=admin_number_service_kb(key)
+    )
