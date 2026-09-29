@@ -2,6 +2,7 @@
 Админ: управление складом номеров.
 """
 import logging
+import os
 
 from aiogram import Router, F
 from aiogram.types import (
@@ -12,7 +13,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 import database as db
-from config import ADMIN_IDS
 from keyboards import (
     admin_back_kb,
     admin_numbers_kb,
@@ -21,8 +21,10 @@ from keyboards import (
     admin_number_clear_confirm_kb,
 )
 
-router = Router()
+# Читаем ADMIN_IDS из переменных окружения
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
+router = Router()
 
 # ============================================================
 # FSM
