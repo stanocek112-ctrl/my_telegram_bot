@@ -25,6 +25,7 @@ async def init_db():
                 status TEXT DEFAULT 'pending',
                 invoice_id INTEGER,
                 payload TEXT UNIQUE,
+                code TEXT,
                 created_at TEXT,
                 paid_at TEXT
             )
@@ -105,6 +106,11 @@ async def init_db():
                 created_at TEXT
             )
         """)
+        # Миграция: добавляем колонку code, если её нет в старой БД
+        try:
+            await db.execute("ALTER TABLE orders ADD COLUMN code TEXT")
+        except Exception:
+            pass  # колонка уже есть
         await db.commit()
 
 
@@ -162,6 +168,46 @@ async def get_order_by_invoice(invoice_id: int):
             "SELECT * FROM orders WHERE invoice_id = ?", (invoice_id,)
         ) as cur:
             return await cur.fetchone()
+
+
+async def get_order(order_id: int):
+    """Возвращает заказ по ID (dict) или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM orders WHERE id = ?", (order_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def set_order_code(order_id: int, code: str):
+    """Сохраняет код активации в заказ."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE orders SET code = ? WHERE id = ?",
+            (code, order_id)
+        )
+        await db.commit()
+
+
+async def get_orders_without_code(limit: int = 20):
+    """Заказы типа phone без кода — для админа."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT o.*, u.username, u.full_name
+            FROM orders o
+            LEFT JOIN users u ON u.user_id = o.user_id
+            WHERE o.status = 'paid'
+              AND o.service_key IN (
+                  SELECT key FROM services WHERE delivery_type = 'phone'
+              )
+              AND (o.code IS NULL OR o.code = '')
+            ORDER BY o.id DESC
+            LIMIT ?
+        """, (limit,)) as cur:
+            return [dict(r) async for r in cur]
 
 
 async def mark_paid(payload: str):
