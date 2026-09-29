@@ -1,6 +1,8 @@
 from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
 )
 
 
@@ -265,3 +267,67 @@ def admin_user_view_kb(user_id: int, blocked: bool):
         text="« К списку", callback_data="adm_users"
     )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ============================================================
+# СКЛАД НОМЕРОВ
+# ============================================================
+
+def admin_numbers_kb(services_with_stock: list):
+    """Меню управления номерами — список услуг со статистикой."""
+    buttons = []
+    for s in services_with_stock:
+        emoji = s.get("emoji") or "📦"
+        name = s.get("name") or s["key"]
+        free = s.get("free_count", 0)
+        total = s.get("total_count", 0)
+        buttons.append([InlineKeyboardButton(
+            text=f"{emoji} {name} — {free}/{total} свободно",
+            callback_data=f"adm_num_{s['key']}"
+        )])
+    buttons.append([InlineKeyboardButton(
+        text="« Назад", callback_data="adm_back"
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_number_service_kb(key: str):
+    """Меню действий для конкретной услуги."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="➕ Добавить номера",
+            callback_data=f"adm_num_add_{key}"
+        )],
+        [InlineKeyboardButton(
+            text="📊 Статистика",
+            callback_data=f"adm_num_stats_{key}"
+        )],
+        [InlineKeyboardButton(
+            text="🗑 Очистить склад",
+            callback_data=f"adm_num_clear_{key}"
+        )],
+        [InlineKeyboardButton(
+            text="« К списку", callback_data="adm_numbers"
+        )],
+    ])
+
+
+def admin_number_cancel_kb(key: str = None):
+    """Кнопка отмены при добавлении номеров."""
+    back = f"adm_num_{key}" if key else "adm_numbers"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="« Отмена", callback_data=back)]
+    ])
+
+
+def admin_number_clear_confirm_kb(key: str):
+    """Подтверждение очистки склада."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🗑 Да, удалить все",
+            callback_data=f"adm_num_clear_do_{key}"
+        )],
+        [InlineKeyboardButton(
+            text="« Отмена", callback_data=f"adm_num_{key}"
+        )],
+    ])
