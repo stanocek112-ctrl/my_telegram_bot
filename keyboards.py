@@ -41,6 +41,8 @@ def admin_main_kb(open_tickets: int = 0):
                               callback_data="adm_users")],
         [InlineKeyboardButton(text="📱 Номера",
                               callback_data="adm_numbers")],
+        [InlineKeyboardButton(text="🔑 Ввести код",
+                              callback_data="adm_set_code")],   # 👈 НОВАЯ КНОПКА
         [InlineKeyboardButton(text="📢 Рассылка",
                               callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="📋 Последние заказы",
@@ -330,4 +332,36 @@ def admin_number_clear_confirm_kb(key: str):
         [InlineKeyboardButton(
             text="« Отмена", callback_data=f"adm_num_{key}"
         )],
+    ])
+
+
+# ============================================================
+# ВВОД КОДА
+# ============================================================
+
+def admin_code_orders_kb(orders: list):
+    """Список заказов без кода для админа."""
+    buttons = []
+    for o in orders:
+        username = (
+            f"@{o['username']}" if o.get("username")
+            else (o.get("full_name") or f"ID{o['user_id']}")
+        )
+        phone = (o.get("phone") or "—")[:16]
+        buttons.append([InlineKeyboardButton(
+            text=f"#{o['id']} • {username[:18]} • {phone}",
+            callback_data=f"adm_code_{o['id']}"
+        )])
+    buttons.append([InlineKeyboardButton(
+        text="« Назад", callback_data="adm_back"
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_code_cancel_kb():
+    """Кнопка отмены при вводе кода."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="« Отмена", callback_data="adm_set_code"
+        )]
     ])
