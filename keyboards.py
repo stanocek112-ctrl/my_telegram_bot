@@ -22,7 +22,10 @@ def back_kb():
 
 
 def admin_main_kb(open_tickets: int = 0):
-    tickets_label = f"📩 Обращения ({open_tickets})" if open_tickets else "📩 Обращения"
+    tickets_label = (
+        f"📩 Обращения ({open_tickets})" if open_tickets
+        else "📩 Обращения"
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика",
                               callback_data="adm_stats")],
@@ -31,15 +34,16 @@ def admin_main_kb(open_tickets: int = 0):
         [InlineKeyboardButton(text=tickets_label,
                               callback_data="adm_tickets")],
         [InlineKeyboardButton(text="💰 Балансы",
-                              callback_data="adm_balances")],   # 👈
+                              callback_data="adm_balances")],
         [InlineKeyboardButton(text="🚫 Пользователи",
                               callback_data="adm_users")],
+        [InlineKeyboardButton(text="📱 Номера",
+                              callback_data="adm_numbers")],
         [InlineKeyboardButton(text="📢 Рассылка",
                               callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="📋 Последние заказы",
                               callback_data="adm_orders")],
     ])
-
 
 def admin_services_kb(services: list):
     buttons = [[InlineKeyboardButton(
