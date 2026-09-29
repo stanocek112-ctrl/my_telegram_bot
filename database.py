@@ -1,12 +1,9 @@
 import aiosqlite
-from datetime import datetime
-
-import aiosqlite
 import os
 from datetime import datetime
 
 DB_PATH = "/data/shop.db" if os.path.isdir("/data") else "shop.db"
-#плдывф
+
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -41,6 +38,17 @@ async def init_db():
                 emoji TEXT,
                 delivery_type TEXT,
                 delivery_content TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS numbers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service_key TEXT,
+                phone TEXT,
+                status TEXT DEFAULT 'free',
+                order_id INTEGER,
+                added_at TEXT,
+                used_at TEXT
             )
         """)
         await db.execute("""
@@ -99,6 +107,7 @@ async def init_db():
         """)
         await db.commit()
 
+
 # ---------- Пользователи ----------
 
 async def add_user(user_id: int, username: str, full_name: str):
@@ -127,13 +136,14 @@ async def count_users():
 
 async def create_order(user_id, service_key, service_name, amount, payload, invoice_id):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
+        cur = await db.execute(
             "INSERT INTO orders (user_id, service_key, service_name, amount, payload, "
             "invoice_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
             (user_id, service_key, service_name, amount, payload, invoice_id,
              datetime.now().isoformat())
         )
         await db.commit()
+        return cur.lastrowid
 
 
 async def get_order_by_payload(payload: str):
@@ -192,8 +202,15 @@ async def sync_services(services: dict):
                 "INSERT OR IGNORE INTO services "
                 "(key, name, description, price_usdt, emoji, delivery_type, delivery_content) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (key, s["name"], s["description"], s["price_usdt"], s["emoji"],
-                 s.get("delivery_type", "text"), s.get("delivery_content", ""))
+                (
+                    key,
+                    s.get("name", key),
+                    s.get("description", ""),
+                    s.get("price_usdt", 0.0),
+                    s.get("emoji", "🛍"),
+                    s.get("delivery_type", "text"),
+                    s.get("delivery_content", ""),
+                )
             )
         await db.commit()
 
@@ -247,6 +264,122 @@ async def add_service(key, name, description, price, emoji, d_type, d_content):
             (key, name, description, price, emoji, d_type, d_content)
         )
         await db.commit()
+
+
+# ---------- Склад номеров ----------
+
+async def add_numbers_bulk(service_key: str, phones: list) -> int:
+    added = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        for phone in phones:
+            phone = phone.strip()
+            if not phone:
+                continue
+            async with db.execute(
+                "SELECT id FROM numbers WHERE phone=? AND service_key=?",
+                (phone, service_key)
+            ) as cur:
+                if await cur.fetchone():
+                    continue
+            await db.execute(
+                "INSERT INTO numbers (service_key, phone, status, added_at) "
+                "VALUES (?, ?, 'free', ?)",
+                (service_key, phone, datetime.now().isoformat())
+            )
+            added += 1
+        await db.commit()
+    return added
+
+
+async def take_free_number(service_key: str, order_id: int = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM numbers WHERE service_key=? AND status='free' "
+            "ORDER BY id LIMIT 1",
+            (service_key,)
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+
+        if order_id is not None:
+            await db.execute(
+                "UPDATE numbers SET status='busy', order_id=?, used_at=? "
+                "WHERE id=?",
+                (order_id, datetime.now().isoformat(), row["id"])
+            )
+        else:
+            await db.execute(
+                "UPDATE numbers SET status='busy', used_at=? WHERE id=?",
+                (datetime.now().isoformat(), row["id"])
+            )
+        await db.commit()
+        return dict(row)
+
+
+async def update_number_order(number_id: int, order_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE numbers SET order_id=? WHERE id=?",
+            (order_id, number_id)
+        )
+        await db.commit()
+
+
+async def count_free_numbers(service_key: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM numbers WHERE service_key=? AND status='free'",
+            (service_key,)
+        ) as cur:
+            return (await cur.fetchone())[0]
+
+
+async def count_total_numbers(service_key: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM numbers WHERE service_key=?",
+            (service_key,)
+        ) as cur:
+            return (await cur.fetchone())[0]
+
+
+async def count_used_numbers(service_key: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM numbers WHERE service_key=? "
+            "AND status IN ('busy','used')",
+            (service_key,)
+        ) as cur:
+            return (await cur.fetchone())[0]
+
+
+async def clear_all_numbers(service_key: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM numbers WHERE service_key=?", (service_key,)
+        ) as cur:
+            count = (await cur.fetchone())[0]
+        await db.execute("DELETE FROM numbers WHERE service_key=?", (service_key,))
+        await db.commit()
+        return count
+
+
+async def get_services_with_stock():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT 
+                s.key, s.name, s.emoji, s.price_usdt,
+                (SELECT COUNT(*) FROM numbers n 
+                 WHERE n.service_key = s.key AND n.status='free') AS free_count,
+                (SELECT COUNT(*) FROM numbers n 
+                 WHERE n.service_key = s.key) AS total_count
+            FROM services s
+            ORDER BY s.name
+        """) as cur:
+            return [dict(r) async for r in cur]
 
 
 # ---------- Тикеты ----------
@@ -378,12 +511,10 @@ async def get_transactions(user_id: int, limit: int = 15):
 
 
 async def get_all_balances(limit: int = 50):
-    """Возвращает ВСЕХ пользователей с их балансом (включая 0)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT u.user_id, "
-            "COALESCE(b.amount, 0) as amount, "
+            "SELECT u.user_id, COALESCE(b.amount, 0) as amount, "
             "u.username, u.full_name "
             "FROM users u "
             "LEFT JOIN balances b ON b.user_id = u.user_id "
@@ -430,12 +561,11 @@ async def get_all_users_with_status():
             "ORDER BY u.created_at DESC LIMIT 50"
         ) as cur:
             return [dict(r) async for r in cur]
-            # ============================================================
-# BACKUP META
-# ============================================================
+
+
+# ---------- Backup Meta ----------
 
 async def save_backup_meta(file_id: str, message_id: int):
-    """Сохраняет file_id последнего бэкапа."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT OR REPLACE INTO backup_meta (id, file_id, message_id, created_at) "
@@ -446,7 +576,6 @@ async def save_backup_meta(file_id: str, message_id: int):
 
 
 async def get_backup_meta():
-    """Возвращает последний бэкап (file_id, message_id) или None."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
