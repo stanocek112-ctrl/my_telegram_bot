@@ -1,52 +1,74 @@
+"""
+Пользовательские хендлеры: каталог, оплата, баланс, тикеты.
+"""
 import logging
 import asyncio
 import random
 from datetime import datetime
 from html import escape
-
-from generators import generate_phone, generate_code
+from typing import Callable, Dict, Any, Awaitable
 
 from aiogram import Router, F, Bot, BaseMiddleware
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
     TelegramObject,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiocryptopay import AioCryptoPay
 from aiocryptopay.const import InvoiceStatus
-from typing import Callable, Dict, Any, Awaitable
 
 import database as db
 from services import PAYMENT_ASSET
 from keyboards import (
     services_kb, back_kb, main_menu_kb,
     user_tickets_kb,
-    balance_menu_kb, topup_amounts_kb,   # 👈
-    payment_choice_kb, cancel_kb,         # 👈
+    balance_menu_kb, topup_amounts_kb,
+    payment_choice_kb, cancel_kb,
 )
-from generators import generate_phone, generate_code
 
 router = Router()
+
+
 # ============================================================
 # FSM-СОСТОЯНИЯ
 # ============================================================
-
-from aiogram.fsm.state import State, StatesGroup
-
 
 class TicketForm(StatesGroup):
     message = State()
 
 
-class CodeFlow(StatesGroup):
-    waiting_code = State()
-
 class BalanceForm(StatesGroup):
     custom_amount = State()
 
-# если у вас есть ещё какие-то FSM — добавьте их здесь тоже
+
+# ============================================================
+# MIDDLEWARE БЛОКИРОВКИ
+# ============================================================
+
+class BlockedUserMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        user = data.get("event_from_user")
+        if user and await db.is_blocked(user.id):
+            if isinstance(event, Message):
+                try:
+                    await event.answer("🚫 Вы заблокированы администратором.")
+                except Exception:
+                    pass
+            return
+        return await handler(event, data)
+
+
+# ============================================================
+# ВЫДАЧА ТОВАРА
+# ============================================================
 
 async def deliver_order(bot: Bot, user_id: int, order: dict, service: dict):
     """Выдаёт товар пользователю в зависимости от типа."""
@@ -79,29 +101,45 @@ async def deliver_order(bot: Bot, user_id: int, order: dict, service: dict):
             await bot.send_message(user_id,
                                    header + "⚠️ Ошибка выдачи файла.")
 
-    # 👇 НОВЫЙ ТИП — номер телефона
+    # 👇 НОВЫЙ ТИП — номер телефона (код вводит админ!)
     elif dtype == "phone":
-        phone = generate_phone()
+        # Берём номер со склада
+        num = await db.take_free_number(service["key"], order.get("id"))
+        if not num:
+            await bot.send_message(
+                user_id,
+                header + "😔 <b>Нет свободных номеров</b>\n\n"
+                "Баланс будет возвращён."
+            )
+            await db.add_balance(
+                user_id, order["amount"],
+                tx_type="refund",
+                description=f"Возврат: {order['service_name']}"
+            )
+            return
+
+        phone = num["phone"]
         text = (
             header +
             f"📱 <b>Ваш номер:</b> <code>{phone}</code>\n\n"
             f"⏱ <b>Время на активацию: 10 минут</b>\n\n"
-            "Нажмите кнопку ниже, когда отправите код на номер."
+            f"💬 <b>Код придёт автоматически</b> в это сообщение.\n"
+            f"Ожидайте…"
         )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="📨 Отправил код",
-                callback_data=f"sent_{order['id']}"
-            )],
-        ])
-        await bot.send_message(user_id, text, reply_markup=kb)
-        
-from html import escape
+        await bot.send_message(user_id, text)
+
+
+# ============================================================
+# /start
+# ============================================================
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot, admin_ids: list):
-    await db.add_user(message.from_user.id, message.from_user.username,
-                      message.from_user.full_name)
+    await db.add_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.full_name
+    )
     is_admin = message.from_user.id in admin_ids
     safe_name = escape(message.from_user.full_name)
     await message.answer(
@@ -111,6 +149,10 @@ async def cmd_start(message: Message, bot: Bot, admin_ids: list):
         reply_markup=main_menu_kb(is_admin)
     )
 
+
+# ============================================================
+# КАТАЛОГ
+# ============================================================
 
 @router.message(F.text == "🛍 Каталог услуг")
 @router.message(Command("catalog"))
@@ -154,6 +196,11 @@ async def buy_service(cb: CallbackQuery):
         reply_markup=payment_choice_kb(key, balance, service["price_usdt"])
     )
 
+
+# ============================================================
+# СОЗДАНИЕ СЧЁТА (крипта)
+# ============================================================
+
 @router.callback_query(F.data.startswith("pay_"))
 async def create_invoice(cb: CallbackQuery, bot: Bot, crypto: AioCryptoPay):
     key = cb.data.replace("pay_", "")
@@ -163,7 +210,6 @@ async def create_invoice(cb: CallbackQuery, bot: Bot, crypto: AioCryptoPay):
         return
 
     await cb.answer("Создаю счёт...")
-
     payload = f"u{cb.from_user.id}_{int(datetime.now().timestamp())}"
 
     try:
@@ -176,7 +222,8 @@ async def create_invoice(cb: CallbackQuery, bot: Bot, crypto: AioCryptoPay):
         )
     except Exception as e:
         logging.error(f"Ошибка CryptoPay: {e}")
-        await cb.message.edit_text("❌ Не удалось создать счёт.", reply_markup=back_kb())
+        await cb.message.edit_text("❌ Не удалось создать счёт.",
+                                   reply_markup=back_kb())
         return
 
     await db.create_order(
@@ -184,35 +231,40 @@ async def create_invoice(cb: CallbackQuery, bot: Bot, crypto: AioCryptoPay):
         payload, invoice.invoice_id
     )
 
-    text = (
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Перейти к оплате",
+                              url=invoice.bot_invoice_url)],
+        [InlineKeyboardButton(text="🔄 Проверить оплату",
+                              callback_data=f"check_{payload}")],
+    ])
+    await cb.message.edit_text(
         f"🧾 <b>Счёт создан!</b>\n\n"
         f"Услуга: <b>{service['name']}</b>\n"
         f"Сумма: <b>{service['price_usdt']} {PAYMENT_ASSET}</b>\n"
         f"Заказ №: <code>{payload}</code>\n\n"
-        "Нажми кнопку ниже и оплати. После оплаты нажми «Проверить»."
+        "Нажми «Перейти к оплате», затем «Проверить».",
+        reply_markup=kb
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Перейти к оплате", url=invoice.bot_invoice_url)],
-        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_{payload}")],
-    ])
-    await cb.message.edit_text(text, reply_markup=kb)
 
+
+# ============================================================
+# ПРОВЕРКА ОПЛАТЫ
+# ============================================================
 
 @router.callback_query(F.data.startswith("check_"))
-async def check_payment(cb: CallbackQuery, bot: Bot, crypto: AioCryptoPay, admin_ids: list):
+async def check_payment(cb: CallbackQuery, bot: Bot, crypto: AioCryptoPay,
+                        admin_ids: list):
     payload = cb.data.replace("check_", "")
     order = await db.get_order_by_payload(payload)
 
     if not order:
         await cb.answer("Заказ не найден", show_alert=True)
         return
-
     if order["status"] == "paid":
         await cb.answer("Уже оплачено ✅", show_alert=True)
         return
 
     await cb.answer("Проверяю...")
-
     try:
         invoices = await crypto.get_invoices(invoice_ids=order["invoice_id"])
         inv = invoices[0] if invoices else None
@@ -231,23 +283,21 @@ async def check_payment(cb: CallbackQuery, bot: Bot, crypto: AioCryptoPay, admin
         order_dict = dict(order)
         order_dict["amount"] = order["amount"]
 
-        # Выдаём товар
         await deliver_order(bot, order["user_id"], order_dict, service)
 
-        # Правим сообщение
         await cb.message.edit_text(
             "✅ <b>Оплата получена!</b>\n\n"
             "Товар выдан — проверь сообщение ниже 👇",
             reply_markup=back_kb()
         )
 
-        # Уведомляем админов
         for aid in admin_ids:
             try:
                 await bot.send_message(
                     aid,
                     f"💰 <b>НОВАЯ ОПЛАТА</b>\n\n"
-                    f"👤 {cb.from_user.full_name} (<code>{cb.from_user.id}</code>)\n"
+                    f"👤 {cb.from_user.full_name} "
+                    f"(<code>{cb.from_user.id}</code>)\n"
                     f"📦 {order['service_name']}\n"
                     f"💵 {order['amount']} {PAYMENT_ASSET}\n"
                     f"🧾 <code>{payload}</code>"
@@ -255,8 +305,13 @@ async def check_payment(cb: CallbackQuery, bot: Bot, crypto: AioCryptoPay, admin
             except Exception:
                 pass
     else:
-        await cb.answer("⏳ Оплата ещё не поступила. Подожди немного.", show_alert=True)
+        await cb.answer("⏳ Оплата ещё не поступила. Подожди немного.",
+                        show_alert=True)
 
+
+# ============================================================
+# МОИ ПОКУПКИ
+# ============================================================
 
 @router.message(F.text == "📦 Мои покупки")
 @router.callback_query(F.data == "my_orders")
@@ -285,6 +340,10 @@ async def my_orders(event, bot: Bot):
     await msg.answer(text)
 
 
+# ============================================================
+# ПОМОЩЬ
+# ============================================================
+
 @router.message(F.text == "🆘 Помощь")
 @router.message(Command("help"))
 async def help_cmd(message: Message):
@@ -294,13 +353,14 @@ async def help_cmd(message: Message):
         "/catalog — каталог услуг\n"
         "🛍 Каталог услуг — кнопка снизу\n"
         "📦 Мои покупки — история заказов\n\n"
-        "Оплата — через @CryptoBot в криптовалюте.\n"
-        "Если оплатил, но товар не пришёл — нажми «Проверить оплату» ещё раз "
-        "или напиши администратору."
+        "Оплата — через @CryptoBot.\n"
+        "Если оплатил, но товар не пришёл — напиши администратору."
     )
-    # ---------- Обращения в поддержку ----------
 
-# ---------- Обращения в поддержку ----------
+
+# ============================================================
+# ТИКЕТЫ
+# ============================================================
 
 @router.message(F.text == "📩 Написать в поддержку")
 async def support_start(message: Message):
@@ -331,19 +391,17 @@ async def ticket_message_save(message: Message, state: FSMContext,
         user_id=message.from_user.id,
         username=message.from_user.username,
         full_name=message.from_user.full_name,
-        phone="",                          # пустая строка вместо номера
+        phone="",
         message=message.text,
     )
     await state.clear()
 
     await message.answer(
         f"✅ <b>Обращение #{ticket_id} создано!</b>\n\n"
-        "Администратор ответит вам в ближайшее время. "
-        "Ответ придёт сюда, в этот чат.",
+        "Администратор ответит в ближайшее время.",
         reply_markup=main_menu_kb(message.from_user.id in admin_ids)
     )
 
-    # Уведомляем админов
     username = f"@{message.from_user.username}" if message.from_user.username else "—"
     notif = (
         f"📩 <b>НОВОЕ ОБРАЩЕНИЕ #{ticket_id}</b>\n\n"
@@ -357,6 +415,7 @@ async def ticket_message_save(message: Message, state: FSMContext,
             await bot.send_message(aid, notif)
         except Exception:
             pass
+
 
 @router.callback_query(F.data == "my_tickets")
 async def my_tickets(cb: CallbackQuery):
@@ -377,99 +436,10 @@ async def my_tickets(cb: CallbackQuery):
             f"   📅 {t['created_at'][:16]}\n\n"
         )
     await cb.message.edit_text(text, reply_markup=user_tickets_kb())
-    # ============================================================
+
+
 # ============================================================
-# ОТПРАВКА КОДА
-# ============================================================
-
-@router.callback_query(F.data.startswith("sent_"))
-async def sent_code_handler(cb: CallbackQuery, bot: Bot):
-    """Пользователь нажал '📨 Отправил код'."""
-    order_id = cb.data.replace("sent_", "")
-    await cb.answer()
-
-    # Сообщение "Ожидаю код…"
-    await cb.message.edit_text(
-        "⏳ <b>Ожидаю код…</b>\n\n"
-        "Код придёт в течение 5–10 секунд.",
-        reply_markup=None
-    )
-
-    # Ждём 5–10 секунд
-    delay = random.randint(5, 10)
-    await asyncio.sleep(delay)
-
-    # Отправляем новый код
-    code = generate_code()
-    await bot.send_message(
-        cb.from_user.id,
-        f"🔔 <b>Новый код!</b>\n\n"
-        f"<code>{code}</code>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="🔄 Повторный код",
-                callback_data=f"resend_{order_id}"
-            )],
-            [InlineKeyboardButton(
-                text="✅ Готово",
-                callback_data=f"done_{order_id}"
-            )],
-        ])
-    )
-
-
-@router.callback_query(F.data.startswith("resend_"))
-async def resend_code_handler(cb: CallbackQuery, bot: Bot):
-    """Кнопка '🔄 Повторный код'."""
-    order_id = cb.data.replace("resend_", "")
-    await cb.answer("Отправляю новый код…")
-
-    delay = random.randint(5, 10)
-    await asyncio.sleep(delay)
-
-    code = generate_code()
-    await bot.send_message(
-        cb.from_user.id,
-        f"🔔 <b>Новый код!</b>\n\n"
-        f"<code>{code}</code>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="🔄 Повторный код",
-                callback_data=f"resend_{order_id}"
-            )],
-            [InlineKeyboardButton(
-                text="✅ Готово",
-                callback_data=f"done_{order_id}"
-            )],
-        ])
-    )
-
-
-@router.callback_query(F.data.startswith("done_"))
-async def done_handler(cb: CallbackQuery, bot: Bot, admin_ids: list):
-    """Кнопка '✅ Готово'."""
-    order_id = cb.data.replace("done_", "")
-    await cb.answer("Готово!")
-
-    await cb.message.edit_text(
-        "✅ <b>Спасибо!</b>\n\n"
-        "Если возникнут вопросы — напишите в поддержку.",
-        reply_markup=None
-    )
-
-    # Уведомляем админов
-    for aid in admin_ids:
-        try:
-            await bot.send_message(
-                aid,
-                f"✅ Пользователь <code>{cb.from_user.id}</code> "
-                f"подтвердил получение кода по заказу "
-                f"<code>{order_id}</code>."
-            )
-        except Exception:
-            pass
-        # ============================================================
-# ВНУТРЕННИЙ БАЛАНС
+# БАЛАНС
 # ============================================================
 
 @router.message(F.text == "💰 Мой баланс")
@@ -483,8 +453,44 @@ async def show_balance(message: Message):
         reply_markup=balance_menu_kb()
     )
 
-   # ============================================================
-# ПОПОЛНЕНИЕ БАЛАНСА — ХЕНДЛЕРЫ
+
+@router.callback_query(F.data == "balance_back")
+async def balance_back(cb: CallbackQuery):
+    await cb.answer()
+    balance = await db.get_balance(cb.from_user.id)
+    await cb.message.edit_text(
+        f"💼 <b>Ваш баланс</b>\n\n"
+        f"💰 Текущий: <b>{balance:.2f} USDT</b>",
+        reply_markup=balance_menu_kb()
+    )
+
+
+@router.callback_query(F.data == "balance_history")
+async def balance_history(cb: CallbackQuery):
+    await cb.answer()
+    txs = await db.get_transactions(cb.from_user.id)
+    if not txs:
+        await cb.message.edit_text(
+            "📜 <b>Транзакций пока нет.</b>",
+            reply_markup=balance_menu_kb()
+        )
+        return
+
+    text = "📜 <b>История операций:</b>\n\n"
+    for t in txs:
+        sign = "+" if t["amount"] > 0 else ""
+        emoji = {"deposit": "💳", "purchase": "🛍",
+                 "admin_add": "➕", "admin_sub": "➖"}.get(t["type"], "•")
+        text += (
+            f"{emoji} {sign}{t['amount']:.2f} USDT\n"
+            f"   {t['description'] or t['type']}\n"
+            f"   📅 {t['created_at'][:16]}\n\n"
+        )
+    await cb.message.edit_text(text, reply_markup=balance_menu_kb())
+
+
+# ============================================================
+# ПОПОЛНЕНИЕ БАЛАНСА
 # ============================================================
 
 @router.callback_query(F.data == "balance_topup")
@@ -566,9 +572,8 @@ async def create_topup_invoice(cb: CallbackQuery, crypto, amount: float):
     ])
     await cb.message.edit_text(
         f"🧾 <b>Счёт создан</b>\n\n"
-        f"Сумма: <b>{amount} {PAYMENT_ASSET}</b>\n"
-        f"Назначение: пополнение баланса\n\n"
-        "Нажмите «Перейти к оплате», затем «Проверить оплату».",
+        f"Сумма: <b>{amount} {PAYMENT_ASSET}</b>\n\n"
+        "Нажмите «Перейти к оплате», затем «Проверить».",
         reply_markup=kb
     )
 
@@ -605,7 +610,7 @@ async def create_topup_invoice_message(message: Message, crypto, amount: float):
     await message.answer(
         f"🧾 <b>Счёт создан</b>\n\n"
         f"Сумма: <b>{amount} {PAYMENT_ASSET}</b>\n\n"
-        "Нажмите «Перейти к оплате», затем «Проверить оплату».",
+        "Нажмите «Перейти к оплате», затем «Проверить».",
         reply_markup=kb
     )
 
@@ -651,6 +656,10 @@ async def check_topup(cb: CallbackQuery, crypto: AioCryptoPay, bot: Bot):
     )
 
 
+# ============================================================
+# ОПЛАТА С БАЛАНСА
+# ============================================================
+
 @router.callback_query(F.data.startswith("paybal_"))
 async def pay_with_balance(cb: CallbackQuery, bot: Bot, admin_ids: list):
     key = cb.data.replace("paybal_", "")
@@ -688,7 +697,7 @@ async def pay_with_balance(cb: CallbackQuery, bot: Bot, admin_ids: list):
         f"📦 {service['name']}\n"
         f"💵 Списано: <b>{price:.2f} USDT</b>\n"
         f"💰 Остаток: <b>{new_balance:.2f} USDT</b>\n\n"
-        "Товар выдан в сообщении ниже 👇"
+        "Товар выдан ниже 👇"
     )
 
     for aid in admin_ids:
@@ -703,35 +712,3 @@ async def pay_with_balance(cb: CallbackQuery, bot: Bot, admin_ids: list):
             )
         except Exception:
             pass
-@router.callback_query(F.data == "balance_back")
-async def balance_back(cb: CallbackQuery):
-    await cb.answer()
-    balance = await db.get_balance(cb.from_user.id)
-    await cb.message.edit_text(
-        f"💼 <b>Ваш баланс</b>\n\n"
-        f"💰 Текущий: <b>{balance:.2f} USDT</b>",
-        reply_markup=balance_menu_kb()
-    )
-@router.callback_query(F.data == "balance_history")
-async def balance_history(cb: CallbackQuery):
-    await cb.answer()
-    txs = await db.get_transactions(cb.from_user.id)
-    if not txs:
-        await cb.message.edit_text(
-            "📜 <b>Транзакций пока нет.</b>\n\n"
-            "Пополните баланс или купите услугу — здесь появится история.",
-            reply_markup=balance_menu_kb()
-        )
-        return
-
-    text = "📜 <b>История операций:</b>\n\n"
-    for t in txs:
-        sign = "+" if t["amount"] > 0 else ""
-        emoji = {"deposit": "💳", "purchase": "🛍",
-                 "admin_add": "➕", "admin_sub": "➖"}.get(t["type"], "•")
-        text += (
-            f"{emoji} {sign}{t['amount']:.2f} USDT\n"
-            f"   {t['description'] or t['type']}\n"
-            f"   📅 {t['created_at'][:16]}\n\n"
-        )
-    await cb.message.edit_text(text, reply_markup=balance_menu_kb())
