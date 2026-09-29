@@ -287,3 +287,8 @@ async def adm_num_clear_confirm(cb: CallbackQuery):
         f"Подтвердите удаление:",
         reply_markup=admin_number_clear_confirm_kb(key)
     )
+
+@router.callback_query()
+async def debug_admin_num(cb: CallbackQuery):
+    print(f"[DEBUG NUM] user_id={cb.from_user.id}, is_admin={cb.from_user.id in ADMIN_IDS}, data={cb.data!r}")
+    await cb.answer()
