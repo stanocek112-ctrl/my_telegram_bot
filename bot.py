@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 import database as db
 from services import SERVICES
-from handlers import user, admin
+from handlers import user, admin, admin_numbers
 
 # Загружаем .env из папки рядом с bot.py (гарантированно)
 ENV_PATH = Path(__file__).parent / ".env"
@@ -67,6 +67,7 @@ async def main():
     # 6. Роутеры
     dp.include_router(admin.router)
     dp.include_router(user.router)
+    dp.include_router(admin_numbers.router)
 
     print("✅ Бот запущен")
     try:
